@@ -160,7 +160,14 @@ export type AgentParse =
  * with `--include-partial-messages` (or the equivalent) writes its output
  * twice.
  */
-export type ParseState = { sawStreamEventText?: boolean };
+export type ParseState = {
+  sawStreamEventText?: boolean;
+  opencodeAccumulatedInputTokens?: number;
+  opencodeAccumulatedOutputTokens?: number;
+  opencodeAccumulatedCacheReadTokens?: number;
+  opencodeAccumulatedCacheWriteTokens?: number;
+  opencodeAccumulatedCost?: number;
+};
 
 /**
  * Build a stateful per-invocation parser. Feed every stdout line through the
@@ -362,7 +369,47 @@ function parseLineWithState(agent: string, line: string, state: ParseState): Age
     if (typeof obj.text === "string") out.push({ kind: "delta", text: obj.text });
   }
 
-  if (agent === "opencode" || agent === "qwen") {
+  if (agent === "opencode") {
+    const part =
+      obj.part && typeof obj.part === "object"
+        ? (obj.part as Record<string, unknown>)
+        : null;
+    const text = [part?.text, part?.content, part?.message, obj.text, obj.content, obj.message].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (text) out.push({ kind: "delta", text });
+    if (obj.type === "step_start" && typeof obj.sessionID === "string") {
+      out.push({ kind: "meta", key: "session", value: obj.sessionID });
+    }
+    if (part?.tokens && typeof part.tokens === "object") {
+      const tokens = part.tokens as {
+        input?: number;
+        output?: number;
+        cache?: { read?: number; write?: number };
+      };
+      state.opencodeAccumulatedInputTokens = (state.opencodeAccumulatedInputTokens ?? 0) + (tokens.input ?? 0);
+      state.opencodeAccumulatedOutputTokens = (state.opencodeAccumulatedOutputTokens ?? 0) + (tokens.output ?? 0);
+      state.opencodeAccumulatedCacheReadTokens = (state.opencodeAccumulatedCacheReadTokens ?? 0) + (tokens.cache?.read ?? 0);
+      state.opencodeAccumulatedCacheWriteTokens = (state.opencodeAccumulatedCacheWriteTokens ?? 0) + (tokens.cache?.write ?? 0);
+
+      out.push({
+        kind: "meta",
+        key: "usage",
+        value: {
+          input_tokens: state.opencodeAccumulatedInputTokens,
+          output_tokens: state.opencodeAccumulatedOutputTokens,
+          cache_read_input_tokens: state.opencodeAccumulatedCacheReadTokens,
+          cache_creation_input_tokens: state.opencodeAccumulatedCacheWriteTokens,
+        },
+      });
+    }
+    if (typeof part?.cost === "number") {
+      state.opencodeAccumulatedCost = (state.opencodeAccumulatedCost ?? 0) + part.cost;
+      out.push({ kind: "meta", key: "cost_usd", value: state.opencodeAccumulatedCost });
+    }
+  }
+
+  if (agent === "qwen") {
     if (typeof obj.text === "string") out.push({ kind: "delta", text: obj.text });
     if (typeof obj.content === "string") out.push({ kind: "delta", text: obj.content });
     if (typeof obj.message === "string") out.push({ kind: "delta", text: obj.message });
